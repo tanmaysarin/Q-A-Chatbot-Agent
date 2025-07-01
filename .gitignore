@@ -1,0 +1,20 @@
+# Environment variables
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS specific
+.DS_Store
+
+# Logs
+*.log
+
+# Virtual environments (if manually created)
+venv/
+
+# LangChain/FAISS local storage
+faiss_store_conveyor_manual/

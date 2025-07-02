@@ -1,6 +1,5 @@
 import os
 import streamlit as st
-import time
 from dotenv import load_dotenv
 
 from langchain.document_loaders import PyMuPDFLoader
@@ -35,14 +34,22 @@ file_path = "faiss_store_conveyor_manual"
 llm = ChatOpenAI(temperature=0.9, model_name="gpt-3.5-turbo")
 embeddings = OpenAIEmbeddings()
 
-# PDF Processing (same as before)
+# PDF Processing with enhanced metadata
 if process_pdf_clicked:
     # Load PDF content
     loader = PyMuPDFLoader(pdf_path)
     with st.spinner("Loading PDF..."):
         data = loader.load()
 
-    # Split into chunks with metadata
+    # Add custom metadata to each document
+    pdf_name = os.path.basename(pdf_path)
+    for doc in data:
+        doc.metadata["pdf_name"] = pdf_name
+        # If page not id doc, then assign it a value of 0. PyMuPDFLoader should do this already
+        if 'page' not in doc.metadata:
+            doc.metadata['page'] = 0
+
+    # Split into chunks with metadata preserved
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=150
@@ -57,14 +64,54 @@ if process_pdf_clicked:
 
     st.sidebar.success("PDF processed successfully! ✅")
 
+
+def get_source_documents_with_pages(chain_result, retriever, query):
+    """Get source documents with page information"""
+    try:
+        # Get the relevant documents for this query
+        relevant_docs = retriever.get_relevant_documents(query)
+
+        sources_info = []
+        seen_pages = set()  # To avoid duplicate pages
+
+        for doc in relevant_docs[:3]:  # Limit to top 3 sources
+            pdf_name = doc.metadata.get('pdf_name', os.path.basename(pdf_path))
+            page_num = doc.metadata.get('page', 'Unknown')
+
+            # Create a unique identifier for this page
+            page_id = f"{pdf_name}_page_{page_num}"
+
+            if page_id not in seen_pages:
+                sources_info.append({
+                    'pdf_name': pdf_name,
+                    'page': page_num + 1,
+                    'content_preview': doc.page_content[:150] + "..." if len(
+                        doc.page_content) > 150 else doc.page_content
+                })
+                seen_pages.add(page_id)
+
+        return sources_info
+
+    except Exception as e:
+        return [{'pdf_name': os.path.basename(pdf_path), 'page': 'Unknown',
+                 'content_preview': 'Source details unavailable'}]
+
+
 # Display chat history
 st.subheader("Chat History")
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
         if message["role"] == "assistant" and "sources" in message:
-            with st.expander("Sources"):
-                st.write(message["sources"])
+            with st.expander("📚 Sources"):
+                # source expander for chat in history
+                for source in message["sources"]:
+                    if isinstance(source, dict):
+                        st.write(f"**📄 {source['pdf_name']} - Page {source['page']}**")
+                        st.write(f"*Preview:* {source['content_preview']}")
+                        st.write("---")
+                    else:
+                        st.write(source)
 
 # Chat input
 if prompt := st.chat_input("Ask a question about the manual..."):
@@ -85,28 +132,31 @@ if prompt := st.chat_input("Ask a question about the manual..."):
                 try:
                     # Load vector store and get answer
                     vectorstore = FAISS.load_local(file_path, embeddings, allow_dangerous_deserialization=True)
-                    chain = RetrievalQAWithSourcesChain.from_llm(llm=llm, retriever=vectorstore.as_retriever())
+                    retriever = vectorstore.as_retriever()
+                    chain = RetrievalQAWithSourcesChain.from_llm(llm=llm, retriever=retriever)
                     result = chain({"question": prompt}, return_only_outputs=True)
 
                     # Display answer
                     answer = result["answer"]
                     st.write(answer)
 
-                    # Display sources
-                    sources = result.get("sources", "")
-                    if sources:
-                        with st.expander("Sources"):
-                            for src in sources.split("\n"):
-                                if src.strip():
-                                    st.write(src)
+                    # Get detailed source information with pages
+                    sources_info = get_source_documents_with_pages(result, retriever, prompt)
+
+                    # expanding section to display source
+                    if sources_info:
+                        with st.expander("📚 Sources"):
+                            for source in sources_info:
+                                st.write(f"**📄 {source['pdf_name']} - Page {source['page']}**")
+                                st.write(f"*Preview:* {source['content_preview']}")
+                                st.write("---")
 
                     # Add assistant message to chat history
                     assistant_message = {
                         "role": "assistant",
-                        "content": answer
+                        "content": answer,
+                        "sources": sources_info
                     }
-                    if sources:
-                        assistant_message["sources"] = sources
 
                     st.session_state.messages.append(assistant_message)
 
